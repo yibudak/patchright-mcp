@@ -1,0 +1,49 @@
+{
+  "name": "@yibudak/patchright-mcp",
+  "version": "0.1.0",
+  "description": "Drop-in stealth replacement for @playwright/mcp. Wraps Patchright's bundled MCP server (Microsoft's playwright-mcp under the hood, patched to evade detection).",
+  "main": "index.js",
+  "bin": {
+    "patchright-mcp": "index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node index.js",
+    "postinstall": "patchright install chromium || true"
+  },
+  "dependencies": {
+    "patchright": "^1.59.4"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "patchright",
+    "playwright",
+    "playwright-mcp",
+    "browser-automation",
+    "stealth",
+    "undetected"
+  ],
+  "author": "Yigit Budak <yigit@altinkaya.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yibudak/patchright-mcp.git"
+  },
+  "homepage": "https://github.com/yibudak/patchright-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/yibudak/patchright-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

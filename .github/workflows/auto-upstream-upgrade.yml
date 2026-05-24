@@ -72,23 +72,30 @@ jobs:
           git push
 
       - name: Publish to npm
+        id: publish
         if: ${{ success() && steps.versions.outputs.changed == 'true' }}
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Open failure issue
-        if: ${{ failure() && (steps.install_latest.conclusion == 'failure' || steps.gate.conclusion == 'failure') }}
+        if: ${{ failure() && (steps.install_latest.conclusion == 'failure' || steps.gate.conclusion == 'failure' || steps.publish.conclusion == 'failure') }}
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT: ${{ steps.versions.outputs.current }}
           LATEST: ${{ steps.versions.outputs.latest }}
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+          PUBLISH_FAILED: ${{ steps.publish.conclusion == 'failure' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh label create upstream-break --color B60205 --description "Upstream patchright change blocking auto-upgrade" 2>/dev/null || true
           gh label create automated --color 0E8A16 --description "Opened by automation" 2>/dev/null || true
 
-          title="Upstream break: patchright-core@$LATEST fails the symbol-presence gate"
+          if [ "$PUBLISH_FAILED" = "true" ]; then
+            title="Publish failed: patchright-core@$LATEST passed the gate but npm publish failed"
+          else
+            title="Upstream break: patchright-core@$LATEST fails the symbol-presence gate"
+          fi
 
           existing="$(gh issue list --state open --label upstream-break --search "$LATEST in:title" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
@@ -96,14 +103,24 @@ jobs:
             exit 0
           fi
 
-          {
-            echo "\`patchright-core@$LATEST\` (currently shipped: \`$CURRENT\`) failed verification. **Nothing was published.**"
-            echo
-            cat gate-report.md 2>/dev/null || echo "_Gate did not run — \`npm install patchright@latest\` failed; see the run log._"
-            echo
-            echo "Run: $RUN_URL"
-            echo
-            echo "The published \`patchright\` range is unchanged. A maintainer must repoint the affected import(s) or pin to a working upstream version before auto-upgrade can resume."
-          } > issue-body.md
+          if [ "$PUBLISH_FAILED" = "true" ]; then
+            {
+              echo "\`patchright-core@$LATEST\` passed the symbol-presence gate and the version bump (\`$NEW_VERSION\`) was committed to the default branch, but \`npm publish\` failed — this is a publish failure, not a gate failure (likely a token, provenance, or registry error). **Nothing was published.**"
+              echo
+              echo "Run: $RUN_URL"
+              echo
+              echo "The default branch is now ahead by the bump commit, but \`$NEW_VERSION\` is not on npm. A maintainer must check the \`NPM_TOKEN\` secret and provenance settings, then re-run this workflow (or \`npm publish\` manually) to ship \`$NEW_VERSION\`."
+            } > issue-body.md
+          else
+            {
+              echo "\`patchright-core@$LATEST\` (currently shipped: \`$CURRENT\`) failed verification. **Nothing was published.**"
+              echo
+              cat gate-report.md 2>/dev/null || echo "_Gate did not run — \`npm install patchright@latest\` failed; see the run log._"
+              echo
+              echo "Run: $RUN_URL"
+              echo
+              echo "The published \`patchright\` range is unchanged. A maintainer must repoint the affected import(s) or pin to a working upstream version before auto-upgrade can resume."
+            } > issue-body.md
+          fi
 
           gh issue create --title "$title" --label upstream-break --label automated --body-file issue-body.md

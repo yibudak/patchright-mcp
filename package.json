@@ -1,6 +1,6 @@
 {
   "name": "@yibudak/patchright-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Drop-in stealth replacement for @playwright/mcp. Wraps Patchright's bundled MCP server (Microsoft's playwright-mcp under the hood, patched to evade detection).",
   "main": "index.js",
   "bin": {
@@ -16,7 +16,7 @@
     "postinstall": "patchright install chromium || true"
   },
   "dependencies": {
-    "patchright": "^1.59.4"
+    "patchright": "1.59.4"
   },
   "engines": {
     "node": ">=18"

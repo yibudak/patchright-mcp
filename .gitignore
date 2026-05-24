@@ -2,3 +2,5 @@ node_modules/
 .DS_Store
 *.log
 .env
+gate-report.md
+issue-body.md

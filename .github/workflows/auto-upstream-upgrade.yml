@@ -1,0 +1,109 @@
+name: Auto-upgrade patchright
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write # commit the version bump back to the default branch
+  issues: write # open a failure issue when the gate goes red
+  id-token: write # npm publish --provenance
+
+concurrency:
+  group: auto-upstream-upgrade
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Resolve installed vs latest patchright-core
+        id: versions
+        run: |
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          current="$(node -p "require('patchright-core/package.json').version")"
+          latest="$(npm view patchright-core version)"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "patchright-core already at $current — nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "patchright-core $current -> $latest"
+          fi
+
+      - name: Install latest upstream
+        id: install_latest
+        if: steps.versions.outputs.changed == 'true'
+        run: npm install patchright@latest --no-save --no-audit --no-fund
+
+      - name: Symbol-presence gate
+        id: gate
+        if: steps.versions.outputs.changed == 'true'
+        run: node scripts/check-symbols.js
+
+      - name: Relax pin and bump version
+        id: bump
+        if: ${{ success() && steps.versions.outputs.changed == 'true' }}
+        run: |
+          pw="$(node -p "require('patchright/package.json').version")"
+          npm pkg set "dependencies.patchright=^$pw"
+          npm install --no-audit --no-fund
+          new_version="$(npm version patch --no-git-tag-version)"
+          echo "patchright_version=$pw" >> "$GITHUB_OUTPUT"
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit upgrade
+        if: ${{ success() && steps.versions.outputs.changed == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: upgrade patchright to ^${{ steps.bump.outputs.patchright_version }} (${{ steps.bump.outputs.new_version }})"
+          git push
+
+      - name: Publish to npm
+        if: ${{ success() && steps.versions.outputs.changed == 'true' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Open failure issue
+        if: ${{ failure() && (steps.install_latest.conclusion == 'failure' || steps.gate.conclusion == 'failure') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.versions.outputs.current }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create upstream-break --color B60205 --description "Upstream patchright change blocking auto-upgrade" 2>/dev/null || true
+          gh label create automated --color 0E8A16 --description "Opened by automation" 2>/dev/null || true
+
+          title="Upstream break: patchright-core@$LATEST fails the symbol-presence gate"
+
+          existing="$(gh issue list --state open --label upstream-break --search "$LATEST in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            echo "Issue #$existing already tracks $LATEST — skipping."
+            exit 0
+          fi
+
+          {
+            echo "\`patchright-core@$LATEST\` (currently shipped: \`$CURRENT\`) failed verification. **Nothing was published.**"
+            echo
+            cat gate-report.md 2>/dev/null || echo "_Gate did not run — \`npm install patchright@latest\` failed; see the run log._"
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo "The published \`patchright\` range is unchanged. A maintainer must repoint the affected import(s) or pin to a working upstream version before auto-upgrade can resume."
+          } > issue-body.md
+
+          gh issue create --title "$title" --label upstream-break --label automated --body-file issue-body.md

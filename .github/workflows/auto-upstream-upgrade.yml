@@ -29,8 +29,8 @@ jobs:
         id: versions
         run: |
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
-          current="$(node -p "require('patchright-core/package.json').version")"
-          latest="$(npm view patchright-core version)"
+          current="$(node -p "require('patchright-core/package.json').version.replace(/^v/, '')")"
+          latest="$(npm view patchright-core version | sed 's/^v//')"
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           if [ "$current" = "$latest" ]; then
@@ -41,22 +41,45 @@ jobs:
             echo "patchright-core $current -> $latest"
           fi
 
+      - name: Publish checked-in package if missing
+        id: publish_current
+        run: |
+          package="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          echo "package_name=$package" >> "$GITHUB_OUTPUT"
+          echo "package_version=$version" >> "$GITHUB_OUTPUT"
+
+          if npm view "$package@$version" version >/dev/null 2>&1; then
+            echo "$package@$version is already published."
+            exit 0
+          fi
+
+          npm run check
+          npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Install latest upstream
         id: install_latest
         if: steps.versions.outputs.changed == 'true'
-        run: npm install patchright@latest --no-save --no-audit --no-fund
+        run: npm install patchright@latest patchright-core@latest --no-save --no-audit --no-fund
 
       - name: Symbol-presence gate
         id: gate
         if: steps.versions.outputs.changed == 'true'
-        run: node scripts/check-symbols.js
+        run: npm run check
 
       - name: Relax pin and bump version
         id: bump
         if: ${{ success() && steps.versions.outputs.changed == 'true' }}
         run: |
-          pw="$(node -p "require('patchright/package.json').version")"
-          npm pkg set "dependencies.patchright=^$pw"
+          pw="$(node -p "require('patchright/package.json').version.replace(/^v/, '')")"
+          core="$(node -p "require('patchright-core/package.json').version.replace(/^v/, '')")"
+          if [ "$pw" != "$core" ]; then
+            echo "patchright@$pw and patchright-core@$core are out of sync" >&2
+            exit 1
+          fi
+          npm pkg set "dependencies.patchright=^$pw" "dependencies.patchright-core=^$core"
           npm install --no-audit --no-fund
           new_version="$(npm version patch --no-git-tag-version)"
           echo "patchright_version=$pw" >> "$GITHUB_OUTPUT"
@@ -74,16 +97,27 @@ jobs:
       - name: Publish to npm
         id: publish
         if: ${{ success() && steps.versions.outputs.changed == 'true' }}
-        run: npm publish --provenance --access public
+        run: |
+          package="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+
+          if npm view "$package@$version" version >/dev/null 2>&1; then
+            echo "$package@$version is already published."
+            exit 0
+          fi
+
+          npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Open failure issue
-        if: ${{ failure() && (steps.install_latest.conclusion == 'failure' || steps.gate.conclusion == 'failure' || steps.publish.conclusion == 'failure') }}
+        if: ${{ failure() && (steps.publish_current.conclusion == 'failure' || steps.install_latest.conclusion == 'failure' || steps.gate.conclusion == 'failure' || steps.publish.conclusion == 'failure') }}
         env:
           GH_TOKEN: ${{ github.token }}
           CURRENT: ${{ steps.versions.outputs.current }}
           LATEST: ${{ steps.versions.outputs.latest }}
+          CURRENT_PACKAGE_VERSION: ${{ steps.publish_current.outputs.package_version }}
+          PUBLISH_CURRENT_FAILED: ${{ steps.publish_current.conclusion == 'failure' }}
           NEW_VERSION: ${{ steps.bump.outputs.new_version }}
           PUBLISH_FAILED: ${{ steps.publish.conclusion == 'failure' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -91,25 +125,38 @@ jobs:
           gh label create upstream-break --color B60205 --description "Upstream patchright change blocking auto-upgrade" 2>/dev/null || true
           gh label create automated --color 0E8A16 --description "Opened by automation" 2>/dev/null || true
 
-          if [ "$PUBLISH_FAILED" = "true" ]; then
+          if [ "$PUBLISH_CURRENT_FAILED" = "true" ]; then
+            title="Publish failed: checked-in package version $CURRENT_PACKAGE_VERSION is not on npm"
+            search_term="$CURRENT_PACKAGE_VERSION"
+          elif [ "$PUBLISH_FAILED" = "true" ]; then
             title="Publish failed: patchright-core@$LATEST passed the gate but npm publish failed"
+            search_term="$LATEST"
           else
             title="Upstream break: patchright-core@$LATEST fails the symbol-presence gate"
+            search_term="$LATEST"
           fi
 
-          existing="$(gh issue list --state open --label upstream-break --search "$LATEST in:title" --json number --jq '.[0].number // empty')"
+          existing="$(gh issue list --state open --label upstream-break --search "$search_term in:title" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
-            echo "Issue #$existing already tracks $LATEST — skipping."
+            echo "Issue #$existing already tracks $search_term - skipping."
             exit 0
           fi
 
-          if [ "$PUBLISH_FAILED" = "true" ]; then
+          if [ "$PUBLISH_CURRENT_FAILED" = "true" ]; then
+            {
+              echo "The checked-in package version \`$CURRENT_PACKAGE_VERSION\` is missing from npm, but \`npm publish\` failed before the upstream upgrade ran. This is a publish failure, not a gate failure (likely a token, provenance, or registry error). **Nothing was published.**"
+              echo
+              echo "Run: $RUN_URL"
+              echo
+              echo "Fix the \`NPM_TOKEN\` secret, provenance settings, or registry error, then re-run this workflow. It now retries publishing checked-in versions that are missing from npm before looking for the next upstream upgrade."
+            } > issue-body.md
+          elif [ "$PUBLISH_FAILED" = "true" ]; then
             {
               echo "\`patchright-core@$LATEST\` passed the symbol-presence gate and the version bump (\`$NEW_VERSION\`) was committed to the default branch, but \`npm publish\` failed — this is a publish failure, not a gate failure (likely a token, provenance, or registry error). **Nothing was published.**"
               echo
               echo "Run: $RUN_URL"
               echo
-              echo "The default branch is now ahead by the bump commit, but \`$NEW_VERSION\` is not on npm. A maintainer must check the \`NPM_TOKEN\` secret and provenance settings, then re-run this workflow (or \`npm publish\` manually) to ship \`$NEW_VERSION\`."
+              echo "The default branch is now ahead by the bump commit, but \`$NEW_VERSION\` is not on npm. A maintainer must check the \`NPM_TOKEN\` secret and provenance settings, then re-run this workflow to ship \`$NEW_VERSION\`."
             } > issue-body.md
           else
             {

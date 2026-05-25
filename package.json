@@ -8,15 +8,19 @@
   },
   "files": [
     "index.js",
+    "scripts/check-symbols.js",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "check": "node scripts/check-symbols.js",
+    "prepublishOnly": "npm run check",
     "start": "node index.js",
     "postinstall": "patchright install chromium || true"
   },
   "dependencies": {
-    "patchright": "1.59.4"
+    "patchright": "1.59.4",
+    "patchright-core": "1.59.4"
   },
   "engines": {
     "node": ">=18"
